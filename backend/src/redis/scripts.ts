@@ -1,4 +1,4 @@
 export const REDIS_KEYS = {
   stock: 'sale:stock',
-  purchases: 'sale:purchases',
+  userLock: (userId: string) => `sale:lock:${userId}`,
 } as const;

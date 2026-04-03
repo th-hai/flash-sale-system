@@ -4,17 +4,76 @@ A high-throughput flash sale backend built with Fastify, Redis, and React. Handl
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for diagrams, or open [docs/architecture.drawio](docs/architecture.drawio) in draw.io.
+![System Diagram](imgs/flash-sale-system.svg)
 
-**Core flow:**
+### Purchase Flow
 
+```mermaid
+sequenceDiagram
+    participant U as User (Browser)
+    participant F as Fastify API
+    participant R as Redis
+    participant Q as Queue
+    participant C as Consumer
+    participant DB as PostgreSQL
+
+    U->>F: POST /api/purchase {userId}
+    F->>F: Check sale window (in-memory)
+    alt Sale not active
+        F-->>U: 403 SALE_NOT_ACTIVE
+    end
+
+    F->>R: DECR sale:stock
+    alt stock < 0
+        F->>R: INCR sale:stock (undo)
+        F-->>U: 410 OUT_OF_STOCK
+    end
+
+    F->>R: SETNX sale:lock:userId
+    alt key already exists
+        F->>R: INCR sale:stock (undo)
+        F-->>U: 409 ALREADY_PURCHASED
+    end
+
+    F->>Q: Publish order {userId} (FIFO, jobId=userId)
+    F-->>U: 201 Purchase confirmed
+
+    Q->>C: Deliver job (FIFO order)
+    C->>DB: INSERT INTO orders (idempotent)
+    alt Insert fails
+        Note over C,Q: Exponential backoff retries
+        C-->>Q: Retry 1 (wait 1s)
+        C-->>Q: Retry 2 (wait 2s)
+        C-->>Q: Retry 3 (wait 4s)
+        C-->>Q: Retry 4 (wait 8s)
+        C-->>Q: Retry 5 (wait 16s)
+        Note over C,Q: All 5 retries exhausted
+        C->>R: INCR stock + DEL lock (compensate)
+        C->>Q: Move to DLQ
+        Q->>C: DLQ worker logs failure
+    end
 ```
-User → React Frontend → Fastify API → Redis (DECR stock, SADD user)
-                              ↓
-                        Queue (BullMQ) → Consumer → PostgreSQL
-                              ↓ (on failure)
-                        DLQ → Compensate (INCR stock, SREM user)
+
+### Concurrency Control Detail
+
+```mermaid
+graph LR
+    subgraph "Step 1: Reserve Stock"
+        A["DECR stock"] --> B{"stock < 0?"}
+        B -->|Yes| C["INCR stock(undo)"]
+        C --> D["OUT_OF_STOCK"]
+    end
+
+    subgraph "Step 2: Lock User"
+        B -->|No| E["SETNX lock:userId"]
+        E --> F{"key exists?"}
+        F -->|Yes| G["INCR stock(undo)"]
+        G --> H["ALREADY_PURCHASED"]
+        F -->|No| I["SUCCESS"]
+    end
 ```
+
+DECR and INCR are atomic Redis operations. SETNX is atomic and returns 0 if the key already exists, providing built-in duplicate detection.
 
 ## Design Choices & Trade-offs
 
@@ -29,7 +88,7 @@ Redis (ElastiCache) as the stock reservation layer. All purchase attempts hit a 
 **Why Redis works here:**
 
 - **<1ms latency**: In-memory, single-threaded command execution.
-- **Atomic without locks**: `DECR`, `INCR`, `SADD` are individually atomic. No distributed locks or conditional expressions needed.
+- **Atomic without locks**: `DECR`, `INCR`, `SET NX` are individually atomic. No distributed locks or conditional expressions needed.
 - **No hot-partition limit**: Single-threaded serialization handles any throughput on one key.
 
 **Alternative option: DynamoDB**
@@ -77,9 +136,8 @@ Exponential backoff: base 1s, multiplier 2x. After 5 failures, job moves to DLQ.
 
 **Dead Letter Queue (DLQ):**
 
-- DLQ worker runs compensation: `INCR sale:stock` + `SREM sale:purchases userId`
-- Rolls back the Redis reservation so stock becomes available again
-- Failed attempt history preserved for debugging
+- Compensation (`INCR sale:stock` + `DEL sale:lock:userId`) runs before the job is pushed to DLQ
+- DLQ worker logs failure history for debugging and monitoring
 
 **Why SQS FIFO over RabbitMQ?**
 
@@ -188,7 +246,7 @@ npm run test:stress
 
 ### Unit Tests (12 tests)
 
-Test sale status logic, purchase service (DECR/INCR/SADD flow), and compensation logic with mocked Redis.
+Test sale status logic, purchase service (DECR/INCR/SETNX flow), and compensation logic with mocked Redis.
 
 ### Integration Tests (12 tests)
 
@@ -214,7 +272,7 @@ Latency p99:        66.0ms
 **Phase 2: 1000 duplicate purchase attempts (all users retry)**
 
 ```
-Out of Stock:       1000  (stock=0, DECR check fires before SADD)
+Out of Stock:       1000  (stock=0, DECR check fires before SETNX)
 New Successes:      0
 Errors:             0
 Time:               44ms
@@ -256,8 +314,9 @@ sale-system/
 │       ├── App.tsx             # Main app
 │       ├── components/         # UI components
 │       └── hooks/              # API hooks
-└── docs/
-    ├── architecture.md         # Mermaid system diagrams
-    └── architecture.drawio     # draw.io diagrams
+└── imgs/
+    ├── flash-sale-system.svg   # System diagram
+    ├── purchase-flow-sequence.png
+    └── concurrency-flow.png
 ```
 

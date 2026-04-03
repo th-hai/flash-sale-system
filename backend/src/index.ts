@@ -9,14 +9,14 @@ import { closeDb } from './db/client.js';
 async function initializeSale() {
   const redis = getRedis();
   const existing = await redis.get(REDIS_KEYS.stock);
-  const purchaseCount = await redis.scard(REDIS_KEYS.purchases);
+  const lockCount = (await redis.keys('sale:lock:*')).length;
 
-  // Initialize if: key missing, OR stock is 0 with no purchases (stale state after flush)
-  if (existing === null || (parseInt(existing, 10) <= 0 && purchaseCount === 0)) {
+  // Initialize if: key missing, OR stock is 0 with no locks (stale state after flush)
+  if (existing === null || (parseInt(existing, 10) <= 0 && lockCount === 0)) {
     await redis.set(REDIS_KEYS.stock, saleConfig.totalStock);
     console.log(`Initialized sale with ${saleConfig.totalStock} items in stock`);
   } else {
-    console.log(`Sale already initialized with ${existing} items remaining (${purchaseCount} purchases)`);
+    console.log(`Sale already initialized with ${existing} items remaining (${lockCount} purchases)`);
   }
   console.log(`Sale window: ${new Date(saleConfig.startTime).toISOString()} - ${new Date(saleConfig.endTime).toISOString()}`);
 }

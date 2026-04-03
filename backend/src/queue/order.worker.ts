@@ -58,11 +58,16 @@ export function startOrderWorker(): Worker {
     const maxAttempts = job.opts.attempts ?? RETRY_CONFIG.maxRetries;
 
     if (attempt >= maxAttempts) {
-      // All retries exhausted → push to Dead Letter Queue
+      // All retries exhausted, compensate and push to Dead Letter Queue
       console.error(
         `[Consumer] EXHAUSTED all ${maxAttempts} retries for user: ${userId}. ` +
-        `Error: ${err.message}. Moving to DLQ.`
+        `Error: ${err.message}. Compensating and moving to DLQ.`
       );
+
+      // Compensate: restore stock and release user lock before DLQ
+      await compensatePurchase(userId);
+      console.error(`[Consumer] Compensation complete - stock restored, user ${userId} lock released`);
+
       const dlq = getDlq();
       await dlq.add('dead-order', {
         ...job.data,
@@ -97,13 +102,9 @@ export function startOrderWorker(): Worker {
  * Dead Letter Queue Worker
  *
  * Processes messages that failed all retries in the order consumer.
- * Compensation logic:
- *   1. INCR sale:stock   → restore the reserved stock
- *   2. SREM sale:purchases userId → remove user from purchased set
- *
- * This ensures the system remains consistent: if we can't persist the
- * order to the database, we roll back the Redis reservation so the
- * stock becomes available again.
+ * Compensation (stock restore + lock release) is already done before
+ * the job reaches the DLQ. This worker logs failure history for
+ * debugging and monitoring.
  */
 export function startDlqWorker(): Worker {
   if (dlqWorker) return dlqWorker;
@@ -112,16 +113,14 @@ export function startDlqWorker(): Worker {
     DLQ_NAME,
     async (job: Job<OrderJobData>) => {
       const { userId, attemptHistory } = job.data;
-      console.error(`[DLQ] Compensating for failed order - user: ${userId}`);
+      console.error(`[DLQ] Processing failed order - user: ${userId}`);
 
       if (attemptHistory?.length) {
         console.error(`[DLQ] Failure history:`);
         attemptHistory.forEach((h) => console.error(`  - ${h}`));
       }
 
-      // Compensate: INCR stock + SREM purchased_user
-      await compensatePurchase(userId);
-      console.error(`[DLQ] Compensation complete - stock restored, user ${userId} removed from purchases`);
+      console.error(`[DLQ] Recorded failed order for user: ${userId} (already compensated)`);
     },
     {
       connection: { host: redisConfig.host, port: redisConfig.port },

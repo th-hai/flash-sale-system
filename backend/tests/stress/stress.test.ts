@@ -12,7 +12,10 @@ async function runStressTest() {
 
   // Setup
   const redis = new Redis({ host: 'localhost', port: 6379 });
-  await redis.del(REDIS_KEYS.stock, REDIS_KEYS.purchases);
+  // Clean up stock and any existing user lock keys
+  await redis.del(REDIS_KEYS.stock);
+  const existingLocks = await redis.keys('sale:lock:*');
+  if (existingLocks.length > 0) await redis.del(...existingLocks);
   await redis.set(REDIS_KEYS.stock, TOTAL_STOCK);
 
   const now = Date.now();
@@ -82,7 +85,7 @@ async function runStressTest() {
 
   // Verify Redis state
   const finalStock = await redis.get(REDIS_KEYS.stock);
-  const purchaseCount = await redis.scard(REDIS_KEYS.purchases);
+  const purchaseCount = (await redis.keys('sale:lock:*')).length;
 
   console.log(`\nRedis State:`);
   console.log(`  Remaining stock:    ${finalStock}`);
@@ -151,7 +154,7 @@ async function runStressTest() {
 
   // Verify stock unchanged
   const finalStock2 = await redis.get(REDIS_KEYS.stock);
-  const purchaseCount2 = await redis.scard(REDIS_KEYS.purchases);
+  const purchaseCount2 = (await redis.keys('sale:lock:*')).length;
   pass('Stock still 0', parseInt(finalStock2!, 10) === 0);
   pass(`Purchase set still has ${TOTAL_STOCK} entries`, purchaseCount2 === TOTAL_STOCK);
 

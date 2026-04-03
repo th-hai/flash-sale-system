@@ -2,21 +2,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockDecr = vi.fn();
 const mockIncr = vi.fn();
-const mockSadd = vi.fn();
-const mockSismember = vi.fn();
 const mockSet = vi.fn();
 const mockGet = vi.fn();
-const mockSrem = vi.fn();
+const mockExists = vi.fn();
+const mockDel = vi.fn();
 
 vi.mock('../../src/redis/client.js', () => ({
   getRedis: vi.fn(() => ({
     decr: mockDecr,
     incr: mockIncr,
-    sadd: mockSadd,
-    sismember: mockSismember,
     set: mockSet,
     get: mockGet,
-    srem: mockSrem,
+    exists: mockExists,
+    del: mockDel,
   })),
 }));
 
@@ -31,11 +29,11 @@ describe('purchase.service', () => {
   describe('attemptPurchase', () => {
     it('returns SUCCESS when stock available and user is new', async () => {
       mockDecr.mockResolvedValue(9); // stock after decrement
-      mockSadd.mockResolvedValue(1); // new user added
+      mockSet.mockResolvedValue('OK'); // SETNX succeeded
       const result = await attemptPurchase('user1');
       expect(result).toBe(PurchaseResult.SUCCESS);
       expect(mockDecr).toHaveBeenCalledWith('sale:stock');
-      expect(mockSadd).toHaveBeenCalledWith('sale:purchases', 'user1');
+      expect(mockSet).toHaveBeenCalledWith('sale:lock:user1', '1', 'NX');
     });
 
     it('returns OUT_OF_STOCK when DECR goes below 0 and restores stock', async () => {
@@ -44,12 +42,12 @@ describe('purchase.service', () => {
       const result = await attemptPurchase('user1');
       expect(result).toBe(PurchaseResult.OUT_OF_STOCK);
       expect(mockIncr).toHaveBeenCalledWith('sale:stock'); // undo DECR
-      expect(mockSadd).not.toHaveBeenCalled(); // never reached SADD
+      expect(mockSet).not.toHaveBeenCalled(); // never reached SETNX
     });
 
-    it('returns ALREADY_PURCHASED when user exists and restores stock', async () => {
+    it('returns ALREADY_PURCHASED when user lock exists and restores stock', async () => {
       mockDecr.mockResolvedValue(8); // stock ok
-      mockSadd.mockResolvedValue(0); // user already in set
+      mockSet.mockResolvedValue(null); // SETNX failed, key already exists
       mockIncr.mockResolvedValue(9);
       const result = await attemptPurchase('user1');
       expect(result).toBe(PurchaseResult.ALREADY_PURCHASED);
@@ -58,13 +56,13 @@ describe('purchase.service', () => {
   });
 
   describe('hasUserPurchased', () => {
-    it('returns true when user is in purchases set', async () => {
-      mockSismember.mockResolvedValue(1);
+    it('returns true when user lock key exists', async () => {
+      mockExists.mockResolvedValue(1);
       expect(await hasUserPurchased('user1')).toBe(true);
     });
 
-    it('returns false when user is not in purchases set', async () => {
-      mockSismember.mockResolvedValue(0);
+    it('returns false when user lock key does not exist', async () => {
+      mockExists.mockResolvedValue(0);
       expect(await hasUserPurchased('user1')).toBe(false);
     });
   });
@@ -90,12 +88,12 @@ describe('purchase.service', () => {
   });
 
   describe('compensatePurchase', () => {
-    it('restores stock and removes user from purchased set', async () => {
+    it('restores stock and deletes user lock key', async () => {
       mockIncr.mockResolvedValue(1);
-      mockSrem.mockResolvedValue(1);
+      mockDel.mockResolvedValue(1);
       await compensatePurchase('user1');
       expect(mockIncr).toHaveBeenCalledWith('sale:stock');
-      expect(mockSrem).toHaveBeenCalledWith('sale:purchases', 'user1');
+      expect(mockDel).toHaveBeenCalledWith('sale:lock:user1');
     });
   });
 });

@@ -23,13 +23,17 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await redis.del(REDIS_KEYS.stock, REDIS_KEYS.purchases);
+  const locks = await redis.keys('sale:lock:*');
+  if (locks.length > 0) await redis.del(...locks);
+  await redis.del(REDIS_KEYS.stock);
   await redis.quit();
   await app.close();
 });
 
 beforeEach(async () => {
-  await redis.del(REDIS_KEYS.stock, REDIS_KEYS.purchases);
+  const locks = await redis.keys('sale:lock:*');
+  if (locks.length > 0) await redis.del(...locks);
+  await redis.del(REDIS_KEYS.stock);
   await redis.set(REDIS_KEYS.stock, 10);
 
   const now = Date.now();
